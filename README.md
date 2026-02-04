@@ -11,7 +11,7 @@ A production-grade phishing detection system that combines local AI inference wi
 
 ## Key Features
 
-### 🔍 Multi-Layer Detection Pipeline
+### Multi-Layer Detection Pipeline
 - **URL Analysis**: Typosquatting detection, entropy-based subdomain scanning, victim-tracking token identification
 - **Threat Intelligence**: VirusTotal integration with 70+ antivirus engine checks
 - **Email Authentication**: SPF/DKIM/DMARC verification for .eml files
