@@ -1,0 +1,126 @@
+# Quick Start Guide
+
+Get the Phishing Threat Analyzer running in under 10 minutes.
+
+## Prerequisites
+
+- macOS with Apple Silicon (M2/M3 recommended) or Linux
+- Python 3.10+
+- 16GB+ RAM
+- ~5GB free disk space (for model)
+
+## Installation
+
+### Option 1: Automated Setup (Recommended)
+
+```bash
+chmod +x setup.sh
+./setup.sh
+```
+
+This will:
+1. Create a virtual environment
+2. Install all dependencies
+3. Download the Llama 3.1 8B model (~4GB)
+
+### Option 2: Manual Setup
+
+```bash
+# Create virtual environment
+python3 -m venv llama-env
+source llama-env/bin/activate
+
+# Install dependencies
+pip install -r requirements.txt
+
+# Download model
+python3 -c "from mlx_lm import load; load('mlx-community/Meta-Llama-3.1-8B-Instruct-8bit')"
+```
+
+## Configuration
+
+### VirusTotal API (Optional but Recommended)
+
+1. Create free account at [virustotal.com](https://virustotal.com)
+2. Get your API key from [settings](https://virustotal.com/gui/settings/apikey)
+3. Set environment variable:
+
+```bash
+export VT_API_KEY="your_api_key_here"
+```
+
+Or create a `.env` file:
+```bash
+cp .env.example .env
+# Edit .env and add your key
+```
+
+## Run
+
+```bash
+python web_chat_docs.py
+```
+
+Access at: **http://127.0.0.1:7860**
+
+The first launch takes 30-60 seconds to load the model into memory.
+
+## Quick Test
+
+Paste this URL to see the detector in action:
+
+```
+http://tqbsdnn.inovacegroup.com.br/4TCcBs4563dxFl2146ypksottoen7534VMRFIZMYHTXYPMY1221WQAB231392j12
+```
+
+Expected output:
+- No HTTPS encryption
+- Random subdomain detected
+- Victim-tracking token in path
+
+## Troubleshooting
+
+**Model won't download:**
+- Check internet connection
+- Verify you have ~5GB free disk space
+- Try running download manually: `python3 -c "from mlx_lm import load; load('mlx-community/Meta-Llama-3.1-8B-Instruct-8bit')"`
+
+**VirusTotal not working:**
+- Verify API key is set: `echo $VT_API_KEY`
+- Check you haven't exceeded rate limit (4 requests/minute)
+- Test API key at [virustotal.com](https://virustotal.com)
+
+**Out of memory:**
+- Close other applications
+- Minimum 16GB RAM required
+- Consider using smaller model or cloud deployment
+
+## Demo URLs
+
+**Tracking token detection:**
+```
+http://example.com/4TCcBs4563dxFl2146ypksottoen7534VMRFIZMYHTXYPMY
+```
+
+**Typosquatting:**
+```
+http://paypa1.com/secure/login
+http://g00gle.com/verify
+```
+
+**Clean URL:**
+```
+https://github.com/anthropics/anthropic-sdk-python
+```
+
+## Features
+
+- **Upload files**: .eml, .pdf, .docx, .txt, images
+- **Paste URLs**: Direct analysis in chat
+- **OCR**: Extract text from screenshots
+- **Email auth**: SPF/DKIM/DMARC verification
+- **Threat intel**: VirusTotal integration
+
+---
+
+For full documentation, see [README.md](README.md)
