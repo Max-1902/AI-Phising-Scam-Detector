@@ -8,9 +8,10 @@ import numpy as np
 import re
 import base64
 import requests
-from urllib.parse import unquote
+from urllib.parse import unquote, urlparse
 from email import policy
 from email.parser import BytesParser
+from email.utils import parseaddr
 import math
 from collections import Counter
 import os
@@ -19,8 +20,14 @@ import os
 # startup
 # ============================================================
 
+# local folder if present, otherwise pulled from Hugging Face
+MODEL_PATH = os.getenv("MODEL_PATH", "./llama-mlx-8bit"
+                       if os.path.isdir("./llama-mlx-8bit")
+                       else "mlx-community/Meta-Llama-3.1-8B-Instruct-8bit")
+VT_API_KEY = os.getenv("VT_API_KEY", "")
+
 print("Loading Llama 3.1 8B...")
-model, tokenizer = load("./llama-mlx-8bit")
+model, tokenizer = load(MODEL_PATH)
 print("Loading OCR engine...")
 reader = easyocr.Reader(['en'])
 print("Threat Detection System Online!\n")
@@ -43,7 +50,7 @@ def extract_urls(text):
     for chunk in b64_chunks:
         try:
             decoded += " " + base64.b64decode(chunk).decode('utf-8', errors='ignore')
-        except:
+        except Exception:
             pass
 
     pattern = r'https?://[^\s<>"\')\]}]*[^\s<>"\')\]}.,:;!?]'
@@ -52,8 +59,8 @@ def extract_urls(text):
     urls = re.findall(pattern, decoded)
     urls.extend(re.findall(pattern, text))
 
-    # remove duplicates
-    return list(set(urls))
+    # remove duplicates, keep order so the first 5 shown are stable
+    return list(dict.fromkeys(urls))
 
 # helper - calculates string randomness
 # higher entropy = more random
@@ -72,7 +79,15 @@ def calculate_entropy(s):
 def analyze_domain(url):
     results = []
     try:
-        domain = re.search(r'://([^/]+)', url).group(1).lower()
+        # hostname drops user@ and :port, so http://paypal.com@evil.tk
+        # is checked as evil.tk, which is where the browser actually goes
+        parsed = urlparse(url)
+        domain = (parsed.hostname or "").lower()
+        if not domain:
+            return ["❌ Could not read domain from URL"]
+
+        if parsed.username or '@' in parsed.netloc:
+            results.append("🚨 CRITICAL: '@' in URL — real destination is " + domain)
 
         # typosquatting check - common brands attackers impersonate
         known_brands = {
@@ -102,7 +117,7 @@ def analyze_domain(url):
             results.append("⚠️ SUSPICIOUS: High-risk domain extension")
 
         # raw IP address instead of domain name
-        if re.match(r'\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}', domain):
+        if re.fullmatch(r'\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}', domain):
             results.append("🚨 CRITICAL: Raw IP address — no domain name")
 
         # excessive subdomains indicate obfuscation
@@ -111,7 +126,9 @@ def analyze_domain(url):
 
         # known redirect/tracking domains
         redirect_domains = ['mandrillapp.com', 'bit.ly', 'tinyurl.com', 'ow.ly', 'is.gd', 't.co']
-        if any(rd in domain for rd in redirect_domains):
+        # exact or subdomain match - a plain substring check flags
+        # microsoft.com because it contains "t.co"
+        if any(domain == rd or domain.endswith('.' + rd) for rd in redirect_domains):
             results.append("⚠️ INFO: Redirect/tracking URL detected — hides the real destination")
 
         # random subdomain detection
@@ -134,9 +151,8 @@ def analyze_domain(url):
         # victim-tracking token detection
         # phishers embed unique IDs in URLs to track individual targets
         # legitimate paths are short (/login, /payments)
-        path_match = re.search(r'://[^/]+(/.+)', url)
-        if path_match:
-            path = path_match.group(1)
+        path = parsed.path
+        if path:
             segments = [s for s in path.split('/') if s]
             for seg in segments:
                 if len(seg) > 20:
@@ -158,12 +174,12 @@ def analyze_domain(url):
 # ============================================================
 
 def check_virustotal(url):
-    # hardcoded API key for local development
-    API_KEY = "YOUR_API_KEY"
+    if not VT_API_KEY:
+        return ["ℹ️ VirusTotal: skipped (VT_API_KEY not set)"]
 
     try:
         url_id = base64.urlsafe_b64encode(url.encode()).decode().strip("=")
-        headers = {"x-apikey": API_KEY}
+        headers = {"x-apikey": VT_API_KEY}
         response = requests.get(
             f"https://www.virustotal.com/api/v3/urls/{url_id}",
             headers=headers,
@@ -181,7 +197,11 @@ def check_virustotal(url):
                 return [f"⚠️ SUSPICIOUS: {suspicious} vendors flagged as suspicious"]
             return ["✅ VirusTotal: Clean"]
 
-        return ["ℹ️ VirusTotal: URL not in database yet"]
+        if response.status_code == 404:
+            return ["ℹ️ VirusTotal: URL not in database yet"]
+        if response.status_code == 429:
+            return ["⚠️ VirusTotal: rate limit hit (free tier is 4/min)"]
+        return [f"⚠️ VirusTotal: request failed (HTTP {response.status_code})"]
 
     except Exception as e:
         return [f"⚠️ VirusTotal check failed: {str(e)}"]
@@ -190,24 +210,25 @@ def check_virustotal(url):
 # email header analysis - SPF, DKIM, DMARC, Reply-To checks
 # ============================================================
 
-def analyze_email_headers(file):
+def analyze_email_headers(path):
     try:
-        with open(file.name, 'rb') as f:
+        with open(path, 'rb') as f:
             msg = BytesParser(policy=policy.default).parse(f)
 
         results = []
 
-        # SPF verification
-        spf = msg.get('Received-SPF', '')
-        if 'pass' in spf.lower():
+        # DKIM and DMARC are in Authentication-Results header
+        auth = str(msg.get('Authentication-Results', ''))
+
+        # SPF - Received-SPF starts with the result; many providers
+        # only report it as spf=... in Authentication-Results
+        spf = str(msg.get('Received-SPF', '')).strip().lower()
+        if spf.startswith('pass') or 'spf=pass' in auth.lower():
             results.append("✅ SPF: PASS")
-        elif 'fail' in spf.lower():
+        elif spf.startswith(('fail', 'softfail')) or re.search(r'spf=(soft)?fail', auth.lower()):
             results.append("🚨 SPF: FAIL — sender not authorized")
         else:
             results.append("⚠️ SPF: Not found")
-
-        # DKIM and DMARC are in Authentication-Results header
-        auth = msg.get('Authentication-Results', '')
 
         if 'dkim=pass' in auth.lower():
             results.append("✅ DKIM: PASS")
@@ -228,8 +249,9 @@ def analyze_email_headers(file):
         results.append(f"📧 From: {from_addr}")
 
         # Reply-To mismatch is a major red flag
+        # compare addresses only - "Name <a@b.com>" and "a@b.com" are the same
         reply_to = msg.get('Reply-To', None)
-        if reply_to and reply_to != from_addr:
+        if reply_to and parseaddr(str(reply_to))[1].lower() != parseaddr(str(from_addr))[1].lower():
             results.append(f"🚨 Reply-To MISMATCH: {reply_to}")
 
         return results
@@ -293,18 +315,31 @@ def extract_text_from_file(file):
     if not file:
         return ""
 
-    filename = file.name.lower()
+    # clear the previous file's report so it can't leak into this one
+    analysis_report = ""
+
+    # newer gradio passes a path string, older versions a tempfile object
+    path = file if isinstance(file, str) else file.name
+    filename = path.lower()
 
     try:
         # email files - check headers and scan body for URLs
         if filename.endswith('.eml'):
-            headers = analyze_email_headers(file)
-            analysis_report = "⬡ EMAIL AUTHENTICATION ANALYSIS:\n" + "\n".join(headers) + "\n\n"
+            headers = analyze_email_headers(path)
 
-            with open(file.name, 'rb') as f:
+            with open(path, 'rb') as f:
                 msg = BytesParser(policy=policy.default).parse(f)
-                body = msg.get_body(preferencelist=('plain', 'html'))
-                text = body.get_content() if body else ""
+
+            # scan every text part - phishing mails often have a harmless
+            # plain-text part and the real link only in the HTML part
+            parts = []
+            for part in msg.walk():
+                if part.get_content_type() in ('text/plain', 'text/html'):
+                    try:
+                        parts.append(part.get_content())
+                    except Exception:
+                        pass
+            text = "\n".join(parts)
 
             # scan email body for hidden links
             run_security_analysis(text)
@@ -313,29 +348,30 @@ def extract_text_from_file(file):
             return text
 
         # screenshots - use OCR to extract text
-        if filename.endswith(('.png', '.jpg', '.jpeg', '.webp', '.heic')):
-            image = Image.open(file)
+        if filename.endswith(('.png', '.jpg', '.jpeg', '.webp')):
+            image = Image.open(path).convert('RGB')
             text = "\n".join(reader.readtext(np.array(image), detail=0))
             run_security_analysis(text)
             return text
 
         # PDF documents
         if filename.endswith('.pdf'):
-            pdf = PyPDF2.PdfReader(file)
-            text = "\n".join([page.extract_text() for page in pdf.pages])
+            pdf = PyPDF2.PdfReader(path)
+            text = "\n".join([page.extract_text() or "" for page in pdf.pages])
             run_security_analysis(text)
             return text
 
         # Word documents
         if filename.endswith('.docx'):
-            doc = docx.Document(file)
+            doc = docx.Document(path)
             text = "\n".join([p.text for p in doc.paragraphs])
             run_security_analysis(text)
             return text
 
         # plain text files
         if filename.endswith('.txt'):
-            text = file.read().decode('utf-8')
+            with open(path, encoding='utf-8', errors='ignore') as f:
+                text = f.read()
             run_security_analysis(text)
             return text
 
@@ -370,8 +406,8 @@ def clear_document():
     return None, "⬡ SYSTEM IDLE - AWAITING INPUT"
 
 # ============================================================
-# chat function - Python does scanning, Llama explains results
-# this architecture prevents Llama from refusing to analyze URLs
+# chat function - Python does the scanning, Llama only explains
+# the results (asked to judge a raw URL, it tends to refuse)
 # ============================================================
 
 def chat(message, history):
@@ -512,9 +548,6 @@ with gr.Blocks(title="🛡️ PHISHING THREAT ANALYZER") as demo:
             <h1 style='font-size:3.5em; color:#fff; margin:10px 0; letter-spacing:8px; text-shadow: 0 0 20px rgba(255,255,255,0.3);'>⬡ PHISHING THREAT ANALYZER</h1>
             <p style='color:#fff; font-size:1.3em; letter-spacing:3px; margin:15px 0;'>ADVANCED THREAT DETECTION SYSTEM</p>
             <p style='color:#aaa; font-size:0.95em; letter-spacing:2px; font-family:Share Tech Mono, monospace;'>LLAMA 3.1 8B • OCR ENGINE • URL ANALYSIS • VIRUSTOTAL • EMAIL AUTH</p>
-            <div style='margin-top:20px; padding:10px; border:1px solid #333; display:inline-block;'>
-                <p style='color:#fff; font-size:0.8em; margin:0; font-family:Share Tech Mono, monospace;'>SYSTEM STATUS: <span style='color:#0f0;'>● ONLINE</span></p>
-            </div>
         </div>
     """)
 
@@ -564,11 +597,11 @@ with gr.Blocks(title="🛡️ PHISHING THREAT ANALYZER") as demo:
                 </div>
             </div>
             <p style='color:#888; margin:20px 0; font-size:0.85em; font-family:Share Tech Mono, monospace;'>DEVELOPED BY MAX WOJCIECHOWSKI | M2 SILICON | HACKATHON 2026</p>
-            <p style='color:#555; margin:5px 0; font-size:0.7em;'>⬡ AUTHORIZATION LEVEL: UNRESTRICTED ⬡</p>
         </div>
     """)
 
     file_upload.change(upload_document, inputs=[file_upload], outputs=[doc_status])
     clear_btn.click(clear_document, outputs=[file_upload, doc_status])
 
-demo.launch(share=True, css=css)
+# share=True would put the app on a public gradio.live URL - opt in only
+demo.launch(share=os.getenv("GRADIO_SHARE") == "1", css=css)
